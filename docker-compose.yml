@@ -1,0 +1,89 @@
+version: "3.9"
+
+# ─── Общие переменные ──────────────────────────────────────────────────────────
+x-django-env: &django-env
+  SECRET_KEY: ${SECRET_KEY:-super-secret-change-in-production}
+  DEBUG: ${DEBUG:-True}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}
+  DB_NAME: ${DB_NAME:-marketplace}
+  DB_USER: ${DB_USER:-postgres}
+  DB_PASSWORD: ${DB_PASSWORD:-postgres}
+  DB_HOST: db
+  DB_PORT: "5432"
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-admin@marketplace.local}
+  DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-admin1234}
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+
+# ─── Тома ─────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+
+# ─── Сеть ─────────────────────────────────────────────────────────────────────
+networks:
+  marketplace_net:
+    driver: bridge
+
+# ─── Сервисы ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-marketplace}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - marketplace_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-marketplace}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Django + Gunicorn ───────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *django-env
+    volumes:
+      - .:/app                          # hot-reload в dev (убрать в prod)
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    networks:
+      - marketplace_net
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  # ── Nginx ───────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    networks:
+      - marketplace_net
+    depends_on:
+      - web
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

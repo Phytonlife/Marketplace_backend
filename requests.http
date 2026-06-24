@@ -1,0 +1,11 @@
+### Регистрация клиента
+POST http://localhost/api/v1/auth/register/
+Content-Type: application/json
+
+{
+  "email": "client2@test.com",
+  "username": "client2",
+  "password": "pass1234",
+  "password_confirm": "pass1234",
+  "role": "client"
+}
