@@ -19,7 +19,7 @@ class CategoryAdmin(admin.ModelAdmin):
     list_display = ["name", "slug", "parent", "subcategory_count", "icon_preview"]
     list_filter = ["parent"]
     search_fields = ["name", "slug"]
-    prepopulated_fields = {"slug": ("name",)}   # ← автозаполнение slug из name
+    prepopulated_fields = {"slug": ("name",)}
     inlines = [SubcategoryInline]
     ordering = ["name"]
 
@@ -32,13 +32,6 @@ class CategoryAdmin(admin.ModelAdmin):
         if obj.icon:
             return format_html('<img src="{}" height="32" />', obj.icon.url)
         return "—"
-
-
-class ServiceInline(admin.TabularInline):
-    model = Service
-    extra = 0
-    fields = ["title", "category", "price", "price_type", "is_active"]
-    show_change_link = True
 
 
 @admin.register(Service)
@@ -57,8 +50,9 @@ class ServiceAdmin(admin.ModelAdmin):
     list_editable = ["is_active"]
     readonly_fields = ["created_at", "updated_at", "cover_preview"]
     ordering = ["-created_at"]
-    # НЕ используем autocomplete_fields — оно требует search_fields на связанном Admin.
-    # Вместо этого переопределяем get_form и показываем только мастеров.
+
+    # Оставляем автокомплит ТОЛЬКО для категории, так как в CategoryAdmin есть search_fields.
+    autocomplete_fields = ["category"]
 
     fieldsets = (
         (_("Основное"), {
@@ -77,30 +71,32 @@ class ServiceAdmin(admin.ModelAdmin):
 
     def get_form(self, request, obj=None, **kwargs):
         """
-        Фильтруем выпадающий список «Мастер»:
-        показываем только пользователей с role='master'.
-        Без этого суперадмин видит всех юзеров или пустой список.
+        Умный выпадающий список для поля "Мастер".
         """
         from django.contrib.auth import get_user_model
         User = get_user_model()
+
+        # Получаем стандартную форму
         form = super().get_form(request, obj, **kwargs)
-        form.base_fields["master"].queryset = User.objects.filter(
-            role="master"
-        ).order_by("email")
+
+        # Фильтруем: показываем ТОЛЬКО мастеров.
+        form.base_fields["master"].queryset = User.objects.filter(role="master").order_by("email")
+
+        # Делаем красивое отображение в выпадающем списке
         form.base_fields["master"].label_from_instance = lambda u: (
-            f"{u.email}  ({u.get_full_name() or u.username})"
+            f"{u.email} (Рейтинг: {u.master_profile.rating if hasattr(u, 'master_profile') else '0'})"
         )
         return form
 
     @admin.display(description=_("Email мастера"))
     def master_email(self, obj):
-        return obj.master.email
+        return obj.master.email if obj.master else "—"
 
     @admin.display(description=_("Обложка"))
     def cover_preview(self, obj):
         if obj.cover_image:
             return format_html(
-                '<img src="{}" height="80" style="border-radius:4px;" />',
+                '<img src="{}" height="80" style="border-radius:4px; object-fit:cover;" />',
                 obj.cover_image.url,
             )
         return "—"

@@ -35,6 +35,20 @@ class CustomUserAdmin(UserAdmin):
         }),
     )
 
+    def get_inline_instances(self, request, obj=None):
+        """
+        Умное управление инлайнами:
+        1. Прячем инлайн при СОЗДАНИИ нового юзера (obj=None), чтобы избежать IntegrityError от сигналов.
+        2. Прячем инлайн, если юзер — не 'master' (чтобы не показывать профиль мастера клиентам).
+        """
+        if not obj:
+            return []  # Не показываем при добавлении нового пользователя
+
+        if obj.role != CustomUser.Role.MASTER:
+            return []  # Не показываем, если роль не "Мастер"
+
+        return super().get_inline_instances(request, obj)
+
 
 @admin.register(MasterProfile)
 class MasterProfileAdmin(admin.ModelAdmin):
