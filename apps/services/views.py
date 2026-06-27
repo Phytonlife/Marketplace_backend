@@ -78,6 +78,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
         base_qs = (
             Service.objects
             .select_related("master", "master__master_profile", "category")
+            .prefetch_related("event_types", "images")
         )
 
         if not user.is_authenticated:
