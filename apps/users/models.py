@@ -5,7 +5,6 @@ from django.utils.translation import gettext_lazy as _
 
 
 def avatar_upload_path(instance, filename):
-    """Сохраняем аватар в media/avatars/<user_id>/<filename>"""
     ext = filename.rsplit(".", 1)[-1]
     return f"avatars/{instance.pk}/avatar.{ext}"
 
@@ -13,26 +12,22 @@ def avatar_upload_path(instance, filename):
 class CustomUser(AbstractUser):
     """
     Кастомная модель пользователя.
-    Email используется как основной идентификатор вместо username.
+    Авторизация по email. Роли: client / master / admin.
     """
 
     class Role(models.TextChoices):
         CLIENT = "client", _("Клиент")
-        MASTER = "master", _("Мастер")
-        ADMIN = "admin", _("Администратор")
+        MASTER = "master", _("Исполнитель")
+        ADMIN  = "admin",  _("Администратор")
 
-    # AbstractUser уже содержит: username, first_name, last_name,
-    # email, is_staff, is_active, date_joined
-    # Переопределяем email → уникальный, обязательный
     email = models.EmailField(
-        _("email address"),
+        _("email"),
         unique=True,
         error_messages={"unique": _("Пользователь с таким email уже существует.")},
     )
-
     phone_regex = RegexValidator(
         regex=r"^\+?1?\d{9,15}$",
-        message=_("Номер телефона должен быть в формате: '+79991234567'. До 15 цифр."),
+        message=_("Формат: '+77001234567'. До 15 цифр."),
     )
     phone_number = models.CharField(
         _("номер телефона"),
@@ -47,6 +42,7 @@ class CustomUser(AbstractUser):
         max_length=10,
         choices=Role.choices,
         default=Role.CLIENT,
+        db_index=True,
     )
     avatar = models.ImageField(
         _("аватар"),
@@ -55,13 +51,13 @@ class CustomUser(AbstractUser):
         null=True,
     )
 
-    USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["username"]   # username нужен для createsuperuser
+    USERNAME_FIELD  = "email"
+    REQUIRED_FIELDS = ["username"]
 
     class Meta:
-        verbose_name = _("пользователь")
-        verbose_name_plural = _("пользователи")
-        ordering = ["-date_joined"]
+        verbose_name         = _("пользователь")
+        verbose_name_plural  = _("пользователи")
+        ordering             = ["-date_joined"]
 
     def __str__(self):
         return self.email
@@ -79,10 +75,43 @@ class CustomUser(AbstractUser):
         return self.role == self.Role.CLIENT
 
 
+# ─── Kazakhstan Cities ─────────────────────────────────────────────────────────
+
+class KazakhstanCity(models.TextChoices):
+    """
+    Полный список городов Казахстана для маркетплейса.
+    Значение (value) = slug для URL-фильтрации (?city=atyrau).
+    Метка (label)    = отображаемое название на русском.
+
+    Список охватывает все областные центры + крупные города,
+    что покрывает 95%+ населения страны.
+    """
+    ASTANA           = "astana",           _("Астана")
+    ALMATY           = "almaty",           _("Алматы")
+    SHYMKENT         = "shymkent",         _("Шымкент")
+    ATYRAU           = "atyrau",           _("Атырау")
+    AKTAU            = "aktau",            _("Актау")
+    AKTOBE           = "aktobe",           _("Актобе")
+    KARAGANDA        = "karaganda",        _("Караганда")
+    TARAZ            = "taraz",            _("Тараз")
+    PAVLODAR         = "pavlodar",         _("Павлодар")
+    UST_KAMENOGORSK  = "ust_kamenogorsk",  _("Усть-Каменогорск")
+    SEMEY            = "semey",            _("Семей")
+    URALSK           = "uralsk",           _("Уральск")
+    KOSTANAY         = "kostanay",         _("Костанай")
+    KYZYLORDA        = "kyzylorda",        _("Кызылорда")
+    PETROPAVLOVSK    = "petropavlovsk",    _("Петропавловск")
+    KOKSHETAU        = "kokshetau",        _("Кокшетау")
+    TURKESTAN        = "turkestan",        _("Туркестан")
+
+
 class MasterProfile(models.Model):
     """
-    Расширенный профиль для мастеров (исполнителей).
+    Расширенный профиль исполнителя.
     Создаётся автоматически через сигнал при role='master'.
+
+    city — TextChoices по городам Казахстана.
+    Дефолт: Атырау (место регистрации стартапа).
     """
 
     user = models.OneToOneField(
@@ -96,32 +125,46 @@ class MasterProfile(models.Model):
         blank=True,
         help_text=_("Расскажите о себе и своих услугах"),
     )
-    city = models.CharField(_("город"), max_length=100, blank=True)
+    city = models.CharField(
+        _("город"),
+        max_length=20,
+        choices=KazakhstanCity.choices,
+        default=KazakhstanCity.ATYRAU,
+        db_index=True,   # ← фильтрация по городу — частый запрос
+    )
     rating = models.DecimalField(
         _("рейтинг"),
         max_digits=3,
         decimal_places=2,
         default=0.0,
+        db_index=True,   # ← участвует в сортировке priority_score
     )
-    review_count = models.PositiveIntegerField(_("количество отзывов"), default=0)
+    review_count = models.PositiveIntegerField(
+        _("количество отзывов"),
+        default=0,
+    )
     is_verified = models.BooleanField(
         _("верифицирован"),
         default=False,
-        help_text=_("Подтверждено администратором"),
+        help_text=_("Подтверждён администратором платформы"),
+        db_index=True,   # ← участвует в priority_score (Case/When)
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = _("профиль мастера")
-        verbose_name_plural = _("профили мастеров")
+        verbose_name        = _("профиль исполнителя")
+        verbose_name_plural = _("профили исполнителей")
 
     def __str__(self):
-        return f"MasterProfile({self.user.email})"
+        return f"MasterProfile({self.user.email}, {self.get_city_display()})"
 
-    def update_rating(self, new_rating: float):
-        """Пересчитывает средний рейтинг при добавлении нового отзыва."""
+    def update_rating(self, new_rating: float) -> None:
+        """
+        Пересчитывает скользящее среднее при добавлении нового отзыва.
+        Используется из signals.py приложения orders.
+        """
         total = self.rating * self.review_count + new_rating
         self.review_count += 1
         self.rating = round(total / self.review_count, 2)
-        self.save(update_fields=["rating", "review_count"])
+        self.save(update_fields=["rating", "review_count", "updated_at"])
