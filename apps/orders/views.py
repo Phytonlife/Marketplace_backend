@@ -71,6 +71,7 @@ class OrderViewSet(
                 "master__master_profile",
                 "service",
             )
+            .prefetch_related("messages")  # для unread_messages_count без N+1
         )
 
         if user.is_staff:

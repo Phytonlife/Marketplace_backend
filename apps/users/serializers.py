@@ -69,6 +69,12 @@ class RegisterSerializer(serializers.Serializer):
         default="client",
     )
 
+    def save(self, request=None, **kwargs):
+        """
+        Перехватываем аргумент request от библиотеки dj-rest-auth,
+        чтобы избежать ошибки TypeError (takes 1 positional argument but 2 were given).
+        """
+        return super().save(**kwargs)
     def validate_email(self, value):
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError(_("Пользователь с таким email уже зарегистрирован."))

@@ -31,21 +31,30 @@ class ServiceShortSerializer(serializers.ModelSerializer):
 # ─── Order — Read ─────────────────────────────────────────────────────────────
 
 class OrderReadSerializer(serializers.ModelSerializer):
-    client = UserShortSerializer(read_only=True)
-    master = UserShortSerializer(read_only=True)
-    service = ServiceShortSerializer(read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    has_review = serializers.SerializerMethodField()
+    """
+    GET /orders/ и GET /orders/{id}/
 
-    # ИСПРАВЛЕНО: удален source="total_price"
-    total_price = serializers.DecimalField(
+    Поля:
+    - duration_hours        — продолжительность в часах/сутках
+    - event_details         — JSON с деталями мероприятия
+    - total_price           — итоговая стоимость (цена × длительность для почасовых)
+    - unread_messages_count — непрочитанные входящие сообщения текущего пользователя
+    """
+
+    client         = UserShortSerializer(read_only=True)
+    master         = UserShortSerializer(read_only=True)
+    service        = ServiceShortSerializer(read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    has_review     = serializers.SerializerMethodField()
+    total_price    = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         read_only=True,
     )
+    unread_messages_count = serializers.SerializerMethodField()
 
     class Meta:
-        model = Order
+        model  = Order
         fields = [
             "id",
             "client",
@@ -61,6 +70,7 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "address",
             "client_comment",
             "has_review",
+            "unread_messages_count",
             "created_at",
             "updated_at",
         ]
@@ -68,22 +78,60 @@ class OrderReadSerializer(serializers.ModelSerializer):
     def get_has_review(self, obj) -> bool:
         return hasattr(obj, "review")
 
+    def get_unread_messages_count(self, obj) -> int:
+        """
+        Кол-во непрочитанных входящих сообщений для текущего пользователя.
+        - is_read=False        → непрочитано
+        - exclude(sender=user) → только чужие (входящие), не свои
+        - is_system=False      → системные всегда is_read=True, исключаем для чистоты
+
+        Использует prefetch-кэш если queryset настроен с prefetch_related("messages"),
+        иначе делает отдельный COUNT-запрос (безопасный fallback для detail).
+        """
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return 0
+
+        user = request.user
+
+        if hasattr(obj, "_prefetched_objects_cache") and "messages" in obj._prefetched_objects_cache:
+            return sum(
+                1 for msg in obj.messages.all()
+                if not msg.is_read and msg.sender_id != user.pk and not msg.is_system
+            )
+
+        from apps.chat.models import Message
+        return (
+            Message.objects
+            .filter(order=obj, is_read=False, is_system=False)
+            .exclude(sender=user)
+            .count()
+        )
+
 
 # ─── Event Details validator ──────────────────────────────────────────────────
 
+# Схема полей event_details с типами и подсказками.
+# Используется для документации и мягкой валидации.
 EVENT_DETAILS_KNOWN_FIELDS: dict[str, type] = {
-    "guests_count": int,
-    "child_age": int,
-    "theme": str,
-    "format": str,
-    "venue_type": str,
-    "wishes": str,
-    "equipment": bool,
-    "decor_style": str,
+    "guests_count":  int,    # Количество гостей
+    "child_age":     int,    # Возраст именинника (для детских праздников)
+    "theme":         str,    # Тема праздника: "Тачки", "Принцессы", ...
+    "format":        str,    # Формат: "indoor", "outdoor", "online"
+    "venue_type":    str,    # Тип площадки: "квартира", "кафе", "улица"
+    "wishes":        str,    # Пожелания клиента
+    "equipment":     bool,   # Нужно ли оборудование
+    "decor_style":   str,    # Стиль оформления
 }
 
 
 def validate_event_details(value: dict) -> dict:
+    """
+    Мягкая валидация event_details:
+    - Принимает любые ключи (расширяемый формат)
+    - Проверяет типы известных полей
+    - Отклоняет явно неверные структуры
+    """
     if not isinstance(value, dict):
         raise serializers.ValidationError("event_details должен быть объектом JSON.")
 
@@ -112,6 +160,24 @@ def validate_event_details(value: dict) -> dict:
 # ─── Order — Create ───────────────────────────────────────────────────────────
 
 class OrderCreateSerializer(serializers.ModelSerializer):
+    """
+    POST /orders/
+
+    Клиент передаёт:
+    - service_id      — ID услуги
+    - scheduled_time  — дата и время мероприятия
+    - address         — адрес проведения
+    - client_comment  — пожелания (свободный текст)
+    - duration_hours  — продолжительность (для per_hour / per_day)
+    - event_details   — JSON с деталями мероприятия
+
+    Автоматически устанавливаются во вьюхе:
+    - client = request.user
+    - master = service.master
+    - price_at_booking = service.price
+    - status = pending
+    """
+
     service_id = serializers.PrimaryKeyRelatedField(
         queryset=Service.objects.filter(is_active=True),
         source="service",
@@ -122,14 +188,11 @@ class OrderCreateSerializer(serializers.ModelSerializer):
     price_at_booking = serializers.DecimalField(
         max_digits=10, decimal_places=2, read_only=True
     )
-
-    # ИСПРАВЛЕНО: удален source="total_price"
     total_price = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
         read_only=True,
     )
-
     event_details = serializers.JSONField(required=False, default=dict)
 
     class Meta:
@@ -162,9 +225,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         service: Service = attrs.get("service")
         duration = attrs.get("duration_hours")
 
+        # Для почасовых/посуточных услуг duration обязателен
         if service and service.price_type in (
-                Service.PriceType.PER_HOUR,
-                Service.PriceType.PER_DAY,
+            Service.PriceType.PER_HOUR,
+            Service.PriceType.PER_DAY,
         ) and not duration:
             raise serializers.ValidationError({
                 "duration_hours": (
@@ -173,7 +237,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 )
             })
 
-        if service and duration and getattr(service, 'min_duration', None):
+        # Проверяем минимальную длительность
+        if service and duration and service.min_duration:
             if duration < service.min_duration:
                 raise serializers.ValidationError({
                     "duration_hours": (
